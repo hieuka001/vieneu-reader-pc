@@ -27,7 +27,9 @@ def selftest(report_path: str) -> int:
         report["wav"] = out_wav
         report["ok"] = bool(dur > 0.5 and report["rtf"] is not None and report["rtf"] < 1.5)
     except Exception as e:  # noqa: BLE001
+        import traceback
         report["error"] = f"{type(e).__name__}: {e}"
+        report["traceback"] = traceback.format_exc()
     Path(report_path).write_text(json.dumps(report, ensure_ascii=False, indent=1), "utf-8")
     print(json.dumps(report, ensure_ascii=False))
     return 0 if report["ok"] else 1

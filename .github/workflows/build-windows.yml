@@ -25,7 +25,7 @@ jobs:
         if: always()
         run: type engine-report.json
       - name: Build exe (PyInstaller)
-        run: pyinstaller --noconfirm --onedir --windowed --name VieNeuReader --collect-all vieneu --hidden-import fitz --hidden-import PySide6.QtWebEngineWidgets --hidden-import PySide6.QtWebEngineCore run_app.py
+        run: pyinstaller --noconfirm --onedir --windowed --name VieNeuReader --collect-all vieneu --collect-all vieneu_utils --collect-all sea_g2p --hidden-import fitz --hidden-import PySide6.QtWebEngineWidgets --hidden-import PySide6.QtWebEngineCore run_app.py
       - name: Check WebEngine process exists in bundle
         shell: pwsh
         run: |
