@@ -1,11 +1,26 @@
 """Điểm vào: GUI hoặc --selftest <report.json> (kiểm tra engine headless)."""
+import io
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
 
+def _ensure_streams():
+    """Bản exe --windowed không có console: sys.stdout/stderr là None,
+    thư viện nào ghi log/thanh tiến trình (HF download, tqdm...) sẽ sập
+    với "'NoneType' object has no attribute 'write'". Trỏ chúng vào devnull."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    if sys.stdin is None:
+        sys.stdin = io.StringIO("")
+
+
 def selftest(report_path: str) -> int:
+    _ensure_streams()
     report = {"ok": False}
     try:
         t0 = time.time()
@@ -36,6 +51,7 @@ def selftest(report_path: str) -> int:
 
 
 def main() -> int:
+    _ensure_streams()
     if "--selftest" in sys.argv:
         i = sys.argv.index("--selftest")
         report = sys.argv[i + 1] if i + 1 < len(sys.argv) else "selftest-report.json"

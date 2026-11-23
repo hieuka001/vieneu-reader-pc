@@ -83,3 +83,18 @@ def test_webview_js_constants():
     from app.webview_js import EXTRACT_JS, NEXT_JS
     assert "chapter" in EXTRACT_JS and "JSON.stringify" in EXTRACT_JS
     assert "click()" in NEXT_JS
+
+
+def test_ensure_streams_fixes_none():
+    import sys
+    from app.main import _ensure_streams
+    old_out, old_err = sys.stdout, sys.stderr
+    try:
+        sys.stdout = None
+        sys.stderr = None
+        _ensure_streams()
+        assert sys.stdout is not None and hasattr(sys.stdout, "write")
+        assert sys.stderr is not None and hasattr(sys.stderr, "write")
+        print("ghi thử vào stream đã vá", file=sys.stdout)
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
