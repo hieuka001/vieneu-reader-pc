@@ -1,0 +1,5 @@
+--extra-index-url https://pnnbao97.github.io/llama-cpp-python-v0.3.16/cpu/
+PySide6>=6.6
+PyMuPDF>=1.24
+vieneu>=3.8
+numpy>=1.26

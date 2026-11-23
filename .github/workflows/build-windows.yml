@@ -1,0 +1,44 @@
+name: Build Windows
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pyinstaller
+      - name: Logic tests
+        run: python -m pytest tests/ -q
+      - name: Engine self-test (VieNeu thật — tải model + tổng hợp 1 câu)
+        run: python run_app.py --selftest engine-report.json
+      - name: Show engine report
+        if: always()
+        run: type engine-report.json
+      - name: Build exe (PyInstaller)
+        run: pyinstaller --noconfirm --onedir --windowed --name VieNeuReader --collect-all vieneu --hidden-import fitz run_app.py
+      - name: Exe self-test (chạy thử bản đóng gói)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\VieNeuReader\VieNeuReader.exe" -ArgumentList "--selftest","exe-report.json" -Wait -PassThru
+          type exe-report.json
+          if ($p.ExitCode -ne 0) { throw "Exe self-test failed: $($p.ExitCode)" }
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path "dist\VieNeuReader" -DestinationPath "VieNeuReader-Windows.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VieNeuReader-Windows
+          path: |
+            VieNeuReader-Windows.zip
+            engine-report.json
+          retention-days: 30
