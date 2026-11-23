@@ -25,7 +25,13 @@ jobs:
         if: always()
         run: type engine-report.json
       - name: Build exe (PyInstaller)
-        run: pyinstaller --noconfirm --onedir --windowed --name VieNeuReader --collect-all vieneu --hidden-import fitz run_app.py
+        run: pyinstaller --noconfirm --onedir --windowed --name VieNeuReader --collect-all vieneu --hidden-import fitz --hidden-import PySide6.QtWebEngineWidgets --hidden-import PySide6.QtWebEngineCore run_app.py
+      - name: Check WebEngine process exists in bundle
+        shell: pwsh
+        run: |
+          $f = Get-ChildItem -Recurse dist -Filter QtWebEngineProcess.exe | Select-Object -First 1
+          if (-not $f) { throw "QtWebEngineProcess.exe missing from bundle" }
+          Write-Host "WebEngine OK: $($f.FullName)"
       - name: Exe self-test (chạy thử bản đóng gói)
         shell: pwsh
         run: |

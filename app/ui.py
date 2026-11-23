@@ -1,23 +1,31 @@
-"""Cửa sổ chính: thư viện (trái) + trình đọc (phải) + thanh phát (đáy).
-Phong cách: tối giản chức năng, panel kính mờ trên nền gradient tối."""
+"""Cửa sổ chính: thư viện (trái) + [Đọc sách | Web truyện] (phải) + thanh phát (đáy).
+
+- Đọc sách: PDF/EPUB/TXT + truyện web dán link.
+- Web truyện: trình duyệt nhúng (đăng nhập Sáng Tác Việt..., cookie được lưu),
+  bấm "Đọc chương này" để VieNeu đọc; hết chương tự bấm chương tiếp trên trang.
+"""
+import json
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, QUrl
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
-    QInputDialog,
-    QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPushButton, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QPushButton, QSpinBox, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from . import extract, store, webfetch
 from .engine import EngineThread
 from .player import Player
 from .textnorm import build_playback_items
+from .webview_js import EXTRACT_JS, NEXT_JS
 
 STYLE = """
 QMainWindow, QWidget { background: #101613; color: #e8f0ec; font-family: 'Segoe UI'; font-size: 14px; }
-QListWidget, QTextEdit, QComboBox, QSpinBox {
+QListWidget, QTextEdit, QComboBox, QSpinBox, QLineEdit {
   background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
   border-radius: 10px; padding: 6px;
 }
@@ -28,17 +36,19 @@ QPushButton {
   border-radius: 10px; padding: 8px 14px;
 }
 QPushButton:hover { background: rgba(255,255,255,0.16); }
+QPushButton:checked { background: rgba(45,212,191,0.35); }
 QPushButton#playBtn { background: #2dd4bf; color: #04211c; font-weight: 700; border: none; }
 QLabel#statusLbl { color: #9db3aa; }
-QTextEdit { line-height: 150%; }
 """
+
+HOME_URL = "https://sangtacviet.com/"
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Đọc Sách VieNeu")
-        self.resize(1180, 760)
+        self.resize(1220, 800)
         self.setStyleSheet(STYLE)
 
         self.engine = EngineThread()
@@ -51,18 +61,23 @@ class MainWindow(QMainWindow):
         self.player.item_changed.connect(self._on_item)
         self.player.state_changed.connect(self._on_state)
         self.player.waiting.connect(lambda i: self.status_lbl.setText(f"Đang tổng hợp đoạn {i + 1}…"))
+        self.player.finished.connect(self._on_finished)
 
         self.book: dict | None = None
         self.items: list[dict] = []
         self.item_ranges: list[tuple[int, int]] = []
+        self._last_chapter_sig = ""
+        self._poll_left = 0
         self._save_timer = QTimer(self, singleShot=True, interval=4000)
         self._save_timer.timeout.connect(self._flush_progress)
+        self._poll_timer = QTimer(self, interval=1500)
+        self._poll_timer.timeout.connect(self._poll_next_chapter)
 
         root = QWidget()
         self.setCentralWidget(root)
         layout = QHBoxLayout(root)
 
-        # --- Thư viện ---
+        # ---------- Thư viện (trái) ----------
         side = QVBoxLayout()
         side.addWidget(QLabel("Thư viện"))
         self.book_list = QListWidget()
@@ -76,7 +91,7 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(add_btn, 1)
         btn_row.addWidget(del_btn)
         side.addLayout(btn_row)
-        web_btn = QPushButton("🌐 Thêm truyện từ web")
+        web_btn = QPushButton("🌐 Thêm truyện bằng link")
         web_btn.clicked.connect(self._add_web)
         side.addWidget(web_btn)
         side_w = QWidget()
@@ -84,35 +99,25 @@ class MainWindow(QMainWindow):
         side_w.setFixedWidth(260)
         layout.addWidget(side_w)
 
-        # --- Đọc + phát ---
+        # ---------- Vùng phải ----------
         main = QVBoxLayout()
-        top = QHBoxLayout()
-        self.title_lbl = QLabel("Chọn một cuốn sách để bắt đầu")
-        self.title_lbl.setStyleSheet("font-size: 16px; font-weight: 700;")
-        top.addWidget(self.title_lbl, 1)
-        top.addWidget(QLabel("Cỡ chữ"))
-        self.font_spin = QSpinBox(minimum=13, maximum=26, value=17)
-        self.font_spin.valueChanged.connect(self._apply_font)
-        top.addWidget(self.font_spin)
-        main.addLayout(top)
+        toggle = QHBoxLayout()
+        self.view_book_btn = QPushButton("📖 Đọc sách")
+        self.view_book_btn.setCheckable(True)
+        self.view_book_btn.setChecked(True)
+        self.view_book_btn.clicked.connect(lambda: self._switch_view(0))
+        self.view_web_btn = QPushButton("🌐 Web truyện")
+        self.view_web_btn.setCheckable(True)
+        self.view_web_btn.clicked.connect(lambda: self._switch_view(1))
+        toggle.addWidget(self.view_book_btn)
+        toggle.addWidget(self.view_web_btn)
+        toggle.addStretch(1)
+        main.addLayout(toggle)
 
-        self.reader = QTextEdit(readOnly=True)
-        self.reader.mouseReleaseEvent = self._reader_clicked
-        main.addWidget(self.reader, 1)
-
-        self.chapter_bar = QHBoxLayout()
-        self.chapter_combo = QComboBox()
-        self.chapter_combo.setMinimumWidth(260)
-        self.chapter_combo.currentIndexChanged.connect(self._chapter_selected)
-        self.chapter_bar.addWidget(QLabel("Chương"))
-        self.chapter_bar.addWidget(self.chapter_combo, 1)
-        self.next_ch_btn = QPushButton("⬇ Tải chương tiếp")
-        self.next_ch_btn.clicked.connect(self._fetch_next_chapter)
-        self.chapter_bar.addWidget(self.next_ch_btn)
-        self.chapter_widget = QWidget()
-        self.chapter_widget.setLayout(self.chapter_bar)
-        self.chapter_widget.setVisible(False)
-        main.addWidget(self.chapter_widget)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_reader_page())
+        self.stack.addWidget(self._build_browser_page())
+        main.addWidget(self.stack, 1)
 
         bar = QHBoxLayout()
         prev_btn = QPushButton("⏮")
@@ -153,6 +158,87 @@ class MainWindow(QMainWindow):
 
         self._reload_library()
 
+    # ---------- các trang ----------
+    def _build_reader_page(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        top = QHBoxLayout()
+        self.title_lbl = QLabel("Chọn một cuốn sách, hoặc sang tab Web truyện")
+        self.title_lbl.setStyleSheet("font-size: 16px; font-weight: 700;")
+        top.addWidget(self.title_lbl, 1)
+        top.addWidget(QLabel("Cỡ chữ"))
+        self.font_spin = QSpinBox(minimum=13, maximum=26, value=17)
+        self.font_spin.valueChanged.connect(self._apply_font)
+        top.addWidget(self.font_spin)
+        v.addLayout(top)
+
+        self.reader = QTextEdit(readOnly=True)
+        self.reader.mouseReleaseEvent = self._reader_clicked
+        v.addWidget(self.reader, 1)
+
+        chapter_bar = QHBoxLayout()
+        chapter_bar.addWidget(QLabel("Chương"))
+        self.chapter_combo = QComboBox()
+        self.chapter_combo.setMinimumWidth(260)
+        self.chapter_combo.currentIndexChanged.connect(self._chapter_selected)
+        chapter_bar.addWidget(self.chapter_combo, 1)
+        self.next_ch_btn = QPushButton("⬇ Tải chương tiếp")
+        self.next_ch_btn.clicked.connect(self._fetch_next_chapter)
+        chapter_bar.addWidget(self.next_ch_btn)
+        self.chapter_widget = QWidget()
+        self.chapter_widget.setLayout(chapter_bar)
+        self.chapter_widget.setVisible(False)
+        v.addWidget(self.chapter_widget)
+        return page
+
+    def _build_browser_page(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        nav = QHBoxLayout()
+        back_btn = QPushButton("◀")
+        back_btn.setFixedWidth(42)
+        fwd_btn = QPushButton("▶")
+        fwd_btn.setFixedWidth(42)
+        reload_btn = QPushButton("⟳")
+        reload_btn.setFixedWidth(42)
+        self.address = QLineEdit(HOME_URL)
+        self.address.returnPressed.connect(lambda: self.webview.load(QUrl(self.address.text().strip())))
+        nav.addWidget(back_btn)
+        nav.addWidget(fwd_btn)
+        nav.addWidget(reload_btn)
+        nav.addWidget(self.address, 1)
+        v.addLayout(nav)
+
+        profile = QWebEngineProfile("VieNeuWeb", self)
+        profile.setPersistentStoragePath(str(store.data_dir() / "webprofile"))
+        profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+        self.webview = QWebEngineView()
+        self.webview.setPage(QWebEnginePage(profile, self.webview))
+        self.webview.load(QUrl(HOME_URL))
+        self.webview.urlChanged.connect(lambda u: self.address.setText(u.toString()))
+        back_btn.clicked.connect(self.webview.back)
+        fwd_btn.clicked.connect(self.webview.forward)
+        reload_btn.clicked.connect(self.webview.reload)
+        v.addWidget(self.webview, 1)
+
+        bottom = QHBoxLayout()
+        read_btn = QPushButton("▶ Đọc chương này")
+        read_btn.setObjectName("playBtn")
+        read_btn.clicked.connect(self._read_current_page)
+        bottom.addWidget(read_btn)
+        self.auto_next_chk = QCheckBox("Hết chương tự qua chương tiếp")
+        self.auto_next_chk.setChecked(True)
+        bottom.addWidget(self.auto_next_chk)
+        bottom.addStretch(1)
+        bottom.addWidget(QLabel("Đăng nhập 1 lần — app tự nhớ. Mở truyện, vào chương, bấm Đọc chương này."))
+        v.addLayout(bottom)
+        return page
+
+    def _switch_view(self, idx: int):
+        self.stack.setCurrentIndex(idx)
+        self.view_book_btn.setChecked(idx == 0)
+        self.view_web_btn.setChecked(idx == 1)
+
     # ---------- thư viện ----------
     def _reload_library(self, select_id: str | None = None):
         self.book_list.clear()
@@ -166,8 +252,7 @@ class MainWindow(QMainWindow):
                 self.book_list.setCurrentItem(it)
 
     def _add_books(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "Thêm sách", "", "Sách (*.pdf *.epub *.txt)")
+        files, _ = QFileDialog.getOpenFileNames(self, "Thêm sách", "", "Sách (*.pdf *.epub *.txt)")
         last = None
         for f in files:
             try:
@@ -186,8 +271,9 @@ class MainWindow(QMainWindow):
         if not it:
             return
         if QMessageBox.question(self, "Xoá sách", "Xoá sách này khỏi thư viện?") == QMessageBox.StandardButton.Yes:
-            store.remove_book(it.data(Qt.ItemDataRole.UserRole))
-            if self.book and self.book["id"] == it.data(Qt.ItemDataRole.UserRole):
+            book_id = it.data(Qt.ItemDataRole.UserRole)
+            store.remove_book(book_id)
+            if self.book and self.book["id"] == book_id:
                 self.book = None
                 self.reader.clear()
                 self.player.stop()
@@ -200,19 +286,22 @@ class MainWindow(QMainWindow):
                 self._open_book(b)
                 return
 
-    # ---------- mở sách ----------
+    # ---------- mở sách / hiển thị ----------
     def _open_book(self, book: dict):
         self._flush_progress()
         self.book = book
         self.items = build_playback_items(book["paragraphs"])
         self.title_lbl.setText(book["title"])
         self._render_text()
-        voice = book.get("voice") or ""
-        self.player.load(book["id"], self.items, start=book.get("item", 0), voice=voice)
+        self.player.load(book["id"], self.items, start=book.get("item", 0), voice=book.get("voice") or "")
         self._highlight(book.get("item", 0), scroll=True)
         self.pos_lbl.setText(f"Đoạn {book.get('item', 0) + 1}/{len(self.items)}")
         self._refresh_chapter_bar()
-        self.status_lbl.setText("Bấm Nghe để đọc từ đoạn đã đánh dấu, hoặc bấm vào một câu để đọc từ đó.")
+        self._switch_view(0)
+        web = book.get("web") or {}
+        last_ch = (web.get("chapters") or [{}])[-1]
+        self._last_chapter_sig = (last_ch.get("title") or "") + "|" + (book["paragraphs"][last_ch.get("para", 0)] if book["paragraphs"] else "")
+        self.status_lbl.setText("Bấm Nghe để đọc tiếp, hoặc bấm vào một câu để đọc từ đó.")
 
     def _render_text(self):
         self.reader.clear()
@@ -220,10 +309,9 @@ class MainWindow(QMainWindow):
         cursor = self.reader.textCursor()
         fmt = QTextCharFormat()
         para_starts = []
-        for pi, para in enumerate(self.book["paragraphs"]):
+        for para in self.book["paragraphs"]:
             para_starts.append(cursor.position())
             cursor.insertText(para + "\n\n", fmt)
-        # Ánh xạ từng đoạn phát -> khoảng ký tự trong tài liệu
         cursors: dict[int, int] = {}
         for item in self.items:
             pi = item["para"]
@@ -242,8 +330,7 @@ class MainWindow(QMainWindow):
         self._apply_font(self.font_spin.value())
 
     def _apply_font(self, px: int):
-        font = QFont("Segoe UI", px)
-        self.reader.setFont(font)
+        self.reader.setFont(QFont("Segoe UI", px))
 
     def _highlight(self, index: int, scroll: bool = False):
         if not (0 <= index < len(self.item_ranges)):
@@ -275,6 +362,158 @@ class MainWindow(QMainWindow):
                 if not self.player.playing:
                     self.player.play()
                 break
+
+    # ---------- chương (sách web) ----------
+    def _refresh_chapter_bar(self):
+        web = (self.book or {}).get("web")
+        self.chapter_widget.setVisible(bool(web))
+        if not web:
+            return
+        self.chapter_combo.blockSignals(True)
+        self.chapter_combo.clear()
+        for ch in web["chapters"]:
+            self.chapter_combo.addItem(ch["title"])
+        if web.get("live"):
+            self.next_ch_btn.setEnabled(True)
+            self.next_ch_btn.setText("⬇ Qua chương tiếp (trên web)")
+        else:
+            self.next_ch_btn.setEnabled(bool(web.get("next_url")))
+            self.next_ch_btn.setText("⬇ Tải chương tiếp" if web.get("next_url") else "Đã hết chương")
+        self.chapter_combo.blockSignals(False)
+
+    def _chapter_selected(self, idx: int):
+        web = (self.book or {}).get("web")
+        if not web or not (0 <= idx < len(web["chapters"])):
+            return
+        para = web["chapters"][idx]["para"]
+        for i, it in enumerate(self.items):
+            if it["para"] >= para:
+                self.player.go(i)
+                self._highlight(i, scroll=True)
+                break
+
+    def _append_chapter(self, chapter: dict, jump_to_new: bool = False):
+        """Nối 1 chương vào sách hiện tại; giữ nguyên vị trí đang nghe trừ khi jump_to_new."""
+        book = self.book
+        was_playing = self.player.playing
+        cur = self.player.index
+        start_para = len(book["paragraphs"])
+        first_new_item = len(self.items)
+        book["paragraphs"].extend(chapter["paragraphs"])
+        book["web"]["chapters"].append({"title": chapter.get("title") or "Chương tiếp", "para": start_para})
+        if "next_url" in chapter:
+            book["web"]["next_url"] = chapter.get("next_url", "")
+        store.update_book(book)
+        self._last_chapter_sig = (chapter.get("title") or "") + "|" + (chapter["paragraphs"][0] if chapter["paragraphs"] else "")
+        self.items = build_playback_items(book["paragraphs"])
+        self._render_text()
+        target = first_new_item if jump_to_new else cur
+        self.player.load(book["id"], self.items, start=target, voice=book.get("voice") or "")
+        self._highlight(target, scroll=jump_to_new)
+        self.pos_lbl.setText(f"Đoạn {target + 1}/{len(self.items)}")
+        self._refresh_chapter_bar()
+        if was_playing or jump_to_new:
+            self.player.go(target)
+            self.player.play()
+
+    # ---------- truyện web bằng link ----------
+    def _add_web(self):
+        url, ok = QInputDialog.getText(self, "Thêm truyện bằng link", "Dán link chương đầu tiên (hoặc chương bất kỳ):")
+        if not ok or not url.strip():
+            return
+        self.status_lbl.setText("Đang tải chương từ web…")
+        self._fetch = FetchThread(url.strip())
+        self._fetch.done.connect(self._web_added)
+        self._fetch.failed.connect(lambda m: self.status_lbl.setText(m))
+        self._fetch.start()
+
+    def _web_added(self, first: dict):
+        book = store.add_web_book(first)
+        self._reload_library(book["id"])
+        self._open_book(book)
+        self.status_lbl.setText("Đã thêm truyện web. Nghe hết chương thì bấm 'Tải chương tiếp'.")
+
+    def _fetch_next_chapter(self):
+        web = (self.book or {}).get("web")
+        if not web:
+            return
+        if web.get("live"):
+            self._advance_web_chapter()
+            return
+        if not web.get("next_url"):
+            return
+        self.next_ch_btn.setEnabled(False)
+        self.status_lbl.setText("Đang tải chương tiếp…")
+        self._fetch = FetchThread(web["next_url"])
+        self._fetch.done.connect(lambda ch: self._append_chapter(ch))
+        self._fetch.failed.connect(lambda m: (self.status_lbl.setText(m), self._refresh_chapter_bar()))
+        self._fetch.start()
+
+    # ---------- web truyện nhúng (Sáng Tác Việt...) ----------
+    def _read_current_page(self):
+        self.status_lbl.setText("Đang bóc nội dung chương trên trang…")
+        self.webview.page().runJavaScript(EXTRACT_JS, self._on_page_extracted)
+
+    def _on_page_extracted(self, result):
+        try:
+            data = json.loads(result) if isinstance(result, str) else {}
+        except Exception:  # noqa: BLE001
+            data = {}
+        paras = [p for p in data.get("paras", []) if len(p.strip()) >= 2]
+        if len(paras) < 3:
+            self.status_lbl.setText("Chưa bóc được nội dung — hãy mở hẳn vào trang đọc chương rồi bấm lại.")
+            return
+        first = {"title": data.get("title") or "Truyện web", "url": self.webview.url().toString(),
+                 "paragraphs": paras, "next_url": ""}
+        book = store.add_web_book(first)
+        book["web"]["live"] = True
+        store.update_book(book)
+        self._reload_library(book["id"])
+        self._open_book(book)
+        self.player.play()
+        self.status_lbl.setText("Đang đọc chương này. Hết chương app tự bấm chương tiếp trên trang web.")
+
+    def _on_finished(self):
+        web = (self.book or {}).get("web") or {}
+        if web.get("live") and self.auto_next_chk.isChecked():
+            self._advance_web_chapter()
+
+    def _advance_web_chapter(self):
+        self.status_lbl.setText("Đã hết chương — đang bấm chương tiếp trên trang web…")
+        self.webview.page().runJavaScript(NEXT_JS, self._on_next_clicked)
+
+    def _on_next_clicked(self, result):
+        if result == "clicked":
+            self._poll_left = 20
+            self._poll_timer.start()
+        else:
+            self.status_lbl.setText("Không thấy nút 'chương sau' trên trang — anh bấm qua chương trên web rồi bấm 'Đọc chương này'.")
+
+    def _poll_next_chapter(self):
+        self._poll_left -= 1
+        if self._poll_left <= 0:
+            self._poll_timer.stop()
+            self.status_lbl.setText("Trang chưa đổi chương — thử bấm qua chương thủ công trên web.")
+            return
+        self.webview.page().runJavaScript(EXTRACT_JS, self._check_new_chapter)
+
+    def _check_new_chapter(self, result):
+        if not self._poll_timer.isActive():
+            return
+        try:
+            data = json.loads(result) if isinstance(result, str) else {}
+        except Exception:  # noqa: BLE001
+            return
+        paras = [p for p in data.get("paras", []) if len(p.strip()) >= 2]
+        if len(paras) < 3:
+            return
+        sig = (data.get("title") or "") + "|" + paras[0]
+        if sig == self._last_chapter_sig:
+            return  # trang chưa đổi nội dung
+        self._poll_timer.stop()
+        self._append_chapter({"title": data.get("title") or "Chương tiếp", "paragraphs": paras},
+                             jump_to_new=True)
+        self.status_lbl.setText("Đã qua chương mới, đang đọc tiếp.")
 
     # ---------- player callbacks ----------
     def _on_voices(self, voices: list):
@@ -312,78 +551,6 @@ class MainWindow(QMainWindow):
     def _flush_progress(self):
         if self.book:
             store.update_book(self.book)
-
-    # ---------- truyện web ----------
-    def _refresh_chapter_bar(self):
-        web = (self.book or {}).get("web")
-        self.chapter_widget.setVisible(bool(web))
-        if not web:
-            return
-        self.chapter_combo.blockSignals(True)
-        self.chapter_combo.clear()
-        for ch in web["chapters"]:
-            self.chapter_combo.addItem(ch["title"])
-        self.next_ch_btn.setEnabled(bool(web.get("next_url")))
-        self.next_ch_btn.setText("⬇ Tải chương tiếp" if web.get("next_url") else "Đã hết chương")
-        self.chapter_combo.blockSignals(False)
-
-    def _chapter_selected(self, idx: int):
-        web = (self.book or {}).get("web")
-        if not web or not (0 <= idx < len(web["chapters"])):
-            return
-        para = web["chapters"][idx]["para"]
-        for i, it in enumerate(self.items):
-            if it["para"] >= para:
-                self.player.go(i)
-                self._highlight(i, scroll=True)
-                break
-
-    def _add_web(self):
-        url, ok = QInputDialog.getText(self, "Thêm truyện từ web",
-                                       "Dán link chương đầu tiên (hoặc chương bất kỳ):")
-        if not ok or not url.strip():
-            return
-        self.status_lbl.setText("Đang tải chương từ web…")
-        self._fetch = FetchThread(url.strip())
-        self._fetch.done.connect(self._web_added)
-        self._fetch.failed.connect(lambda m: self.status_lbl.setText(m))
-        self._fetch.start()
-
-    def _web_added(self, first: dict):
-        book = store.add_web_book(first)
-        self._reload_library(book["id"])
-        self._open_book(book)
-        self.status_lbl.setText("Đã thêm truyện web. Nghe hết chương thì bấm 'Tải chương tiếp'.")
-
-    def _fetch_next_chapter(self):
-        web = (self.book or {}).get("web")
-        if not web or not web.get("next_url"):
-            return
-        self.next_ch_btn.setEnabled(False)
-        self.status_lbl.setText("Đang tải chương tiếp…")
-        self._fetch = FetchThread(web["next_url"])
-        self._fetch.done.connect(self._next_chapter_added)
-        self._fetch.failed.connect(lambda m: (self.status_lbl.setText(m), self._refresh_chapter_bar()))
-        self._fetch.start()
-
-    def _next_chapter_added(self, chapter: dict):
-        book = self.book
-        was_playing = self.player.playing
-        cur = self.player.index
-        start_para = len(book["paragraphs"])
-        book["paragraphs"].extend(chapter["paragraphs"])
-        book["web"]["chapters"].append({"title": chapter.get("title") or "Chương tiếp", "para": start_para})
-        book["web"]["next_url"] = chapter.get("next_url", "")
-        store.update_book(book)
-        self.items = build_playback_items(book["paragraphs"])
-        self._render_text()
-        self.player.load(book["id"], self.items, start=cur, voice=book.get("voice") or "")
-        self._highlight(cur, scroll=False)
-        self._refresh_chapter_bar()
-        self.status_lbl.setText(f"Đã tải thêm: {chapter.get('title') or 'chương mới'} ({len(chapter['paragraphs'])} đoạn).")
-        if was_playing:
-            self.player.go(cur)
-            self.player.play()
 
     def closeEvent(self, event):
         self._flush_progress()

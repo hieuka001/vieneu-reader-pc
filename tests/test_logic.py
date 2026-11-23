@@ -77,3 +77,9 @@ def test_store_web_book(tmp_path, monkeypatch=None):
     assert book["format"] == "web"
     assert book["web"]["chapters"][0]["para"] == 0
     assert store.load_library()[0]["id"] == book["id"]
+
+
+def test_webview_js_constants():
+    from app.webview_js import EXTRACT_JS, NEXT_JS
+    assert "chapter" in EXTRACT_JS and "JSON.stringify" in EXTRACT_JS
+    assert "click()" in NEXT_JS

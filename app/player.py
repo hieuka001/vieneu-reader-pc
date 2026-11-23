@@ -12,6 +12,7 @@ class Player(QObject):
     item_changed = Signal(int)       # đoạn đang phát thay đổi
     state_changed = Signal(bool)     # True = đang phát
     waiting = Signal(int)            # đang chờ tổng hợp đoạn này
+    finished = Signal()              # đã phát hết đoạn cuối của sách/chương
 
     def __init__(self, engine: EngineThread):
         super().__init__()
@@ -130,3 +131,4 @@ class Player(QObject):
                     self.waiting.emit(self.index)
             else:
                 self.stop()
+                self.finished.emit()
