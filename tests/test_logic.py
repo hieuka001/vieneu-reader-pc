@@ -49,3 +49,31 @@ def test_extract_epub(tmp_path):
     meta = extract.extract_epub(str(p))
     assert meta["title"] == "Sách Test"
     assert any("Xin chào thế giới" in x for x in meta["paragraphs"])
+
+
+FIXTURE_HTML = """<html><head><title>Truyện Hay - Chương 5</title></head><body>
+<div id="chapter-c"><p>Ngày xửa ngày xưa, ở một ngôi làng nhỏ ven sông, có cậu bé chăn cừu rất thông minh.</p>
+<p>Cậu bé ngày ngày dắt đàn cừu lên đồi, vừa chăn vừa đọc sách dưới gốc cây đa cổ thụ.</p>
+<p>Một hôm trời đổ mưa rất to, sấm chớp đùng đùng khiến đàn cừu hoảng sợ chạy tán loạn.</p></div>
+<a href="/truyen/chuong-4">Chương trước</a> <a href="/truyen/chuong-6">Chương sau</a>
+</body></html>"""
+
+
+def test_webfetch_parse():
+    from app.webfetch import parse_chapter_page
+    r = parse_chapter_page(FIXTURE_HTML, "https://example.com/truyen/chuong-5")
+    assert len(r["paragraphs"]) == 3
+    assert r["next_url"] == "https://example.com/truyen/chuong-6"
+    assert r["prev_url"] == "https://example.com/truyen/chuong-4"
+
+
+def test_store_web_book(tmp_path, monkeypatch=None):
+    import os
+    os.environ["APPDATA"] = str(tmp_path)
+    from app import store
+    book = store.add_web_book({"title": "Truyện Test", "url": "https://x/c1",
+                               "paragraphs": ["Đoạn một đủ dài để đọc."],
+                               "next_url": "https://x/c2"})
+    assert book["format"] == "web"
+    assert book["web"]["chapters"][0]["para"] == 0
+    assert store.load_library()[0]["id"] == book["id"]

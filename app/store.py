@@ -79,3 +79,20 @@ def cache_path(book_id: str, text: str, voice: str, precision: str) -> Path:
     d = data_dir() / "cache" / book_id
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{h}.wav"
+
+
+def add_web_book(first: dict) -> dict:
+    """Tạo sách web từ chương đầu tiên đã tải (first = webfetch.fetch_chapter)."""
+    book_id = hashlib.sha1(f"web|{first['url']}|{time.time()}".encode()).hexdigest()[:12]
+    book = {
+        "id": book_id, "title": first.get("title") or "Truyện web",
+        "author": "", "format": "web", "file": "",
+        "paragraphs": first["paragraphs"], "item": 0, "voice": "",
+        "added": int(time.time()),
+        "web": {"next_url": first.get("next_url", ""),
+                "chapters": [{"title": first.get("title") or "Chương 1", "para": 0}]},
+    }
+    books = load_library()
+    books.append(book)
+    save_library(books)
+    return book
