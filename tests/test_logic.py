@@ -98,3 +98,17 @@ def test_ensure_streams_fixes_none():
         print("ghi thử vào stream đã vá", file=sys.stdout)
     finally:
         sys.stdout, sys.stderr = old_out, old_err
+
+
+def test_updater_version_and_release_parse():
+    from app.updater import parse_release, parse_version
+    assert parse_version("pc-v1.1.0") == (1, 1, 0)
+    assert parse_version("pc-v1.0.2") < parse_version("1.1.0")
+    info = parse_release({
+        "tag_name": "pc-v1.2.0", "body": "ghi chú",
+        "html_url": "https://example/r",
+        "assets": [{"name": "notes.txt", "browser_download_url": "https://x/n"},
+                   {"name": "VieNeuReader-Windows-1.2.0.zip",
+                    "browser_download_url": "https://x/app.zip", "size": 123}]})
+    assert info["version"] == (1, 2, 0)
+    assert info["zip_url"] == "https://x/app.zip" and info["size"] == 123

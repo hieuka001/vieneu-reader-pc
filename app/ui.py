@@ -5,19 +5,22 @@
   bấm "Đọc chương này" để VieNeu đọc; hết chương tự bấm chương tiếp trên trang.
 """
 import json
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, QUrl
-from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
+    QProgressDialog,
     QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QSpinBox, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from . import extract, store, webfetch
+from . import extract, store, updater, webfetch
+from . import __version__
 from .engine import EngineThread
 from .player import Player
 from .textnorm import build_playback_items
@@ -94,6 +97,10 @@ class MainWindow(QMainWindow):
         web_btn = QPushButton("🌐 Thêm truyện bằng link")
         web_btn.clicked.connect(self._add_web)
         side.addWidget(web_btn)
+        upd_btn = QPushButton("⟳ Kiểm tra cập nhật")
+        upd_btn.clicked.connect(lambda: self._check_update(manual=True))
+        side.addWidget(upd_btn)
+        side.addWidget(QLabel(f"Phiên bản {__version__}"))
         side_w = QWidget()
         side_w.setLayout(side)
         side_w.setFixedWidth(260)
@@ -157,6 +164,62 @@ class MainWindow(QMainWindow):
         layout.addLayout(main, 1)
 
         self._reload_library()
+        if updater.is_frozen():
+            QTimer.singleShot(4000, lambda: self._check_update(manual=False))
+
+    # ---------- tự cập nhật ----------
+    def _check_update(self, manual: bool):
+        self._upd_thread = UpdateCheckThread()
+        self._upd_thread.found.connect(lambda info: self._update_found(info, manual))
+        self._upd_thread.none.connect(
+            lambda: manual and self.status_lbl.setText("Đang là bản mới nhất."))
+        self._upd_thread.failed.connect(
+            lambda m: manual and self.status_lbl.setText(m))
+        self._upd_thread.start()
+
+    def _update_found(self, info: dict, manual: bool):
+        if info["version"] <= updater.parse_version(__version__):
+            if manual:
+                self.status_lbl.setText("Đang là bản mới nhất.")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Có bản cập nhật mới")
+        box.setText(f"Đã có bản {info['tag']} (đang dùng {__version__}).\n\n{info['notes']}")
+        go = box.addButton("Cập nhật ngay", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Để sau", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not go:
+            return
+        if not updater.is_frozen():
+            QDesktopServices.openUrl(QUrl(info["html_url"]))
+            return
+        if not info["zip_url"]:
+            self.status_lbl.setText("Bản mới chưa có file zip đính kèm.")
+            return
+        dlg = QProgressDialog("Đang tải bản cập nhật…", "Huỷ", 0, 100, self)
+        dlg.setWindowTitle("Cập nhật")
+        dlg.setMinimumDuration(0)
+        dest = Path(tempfile.gettempdir()) / f"VieNeuReader-{info['tag']}.zip"
+        self._dl_thread = DownloadThread(info["zip_url"], dest)
+        self._dl_thread.progress.connect(
+            lambda d, t: dlg.setValue(int(d * 100 / t) if t else 0))
+        self._dl_thread.done.connect(lambda pth: self._apply_downloaded(dlg, pth))
+        self._dl_thread.failed.connect(
+            lambda m: (dlg.close(), self.status_lbl.setText(m)))
+        dlg.canceled.connect(self._dl_thread.requestInterruption)
+        self._dl_thread.start()
+        dlg.exec()
+
+    def _apply_downloaded(self, dlg, zip_path: str):
+        dlg.close()
+        self.status_lbl.setText("Đã tải xong — app sẽ đóng để cập nhật và tự mở lại…")
+        try:
+            updater.apply_update(Path(zip_path))
+        except Exception as e:  # noqa: BLE001
+            self.status_lbl.setText(f"Cập nhật lỗi: {e}")
+            return
+        from PySide6.QtWidgets import QApplication
+        QTimer.singleShot(600, QApplication.quit)
 
     # ---------- các trang ----------
     def _build_reader_page(self) -> QWidget:
@@ -572,3 +635,40 @@ class FetchThread(QThread):
             self.done.emit(webfetch.fetch_chapter(self.url))
         except Exception as e:  # noqa: BLE001
             self.failed.emit(f"Tải web lỗi: {e}")
+
+
+class UpdateCheckThread(QThread):
+    found = Signal(dict)
+    none = Signal()
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            info = updater.check_latest()
+            if info["zip_url"] or info["tag"]:
+                self.found.emit(info)
+            else:
+                self.none.emit()
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(f"Kiểm tra cập nhật lỗi: {e}")
+
+
+class DownloadThread(QThread):
+    progress = Signal(int, int)
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, url: str, dest: Path):
+        super().__init__()
+        self.url = url
+        self.dest = dest
+
+    def run(self):
+        try:
+            updater.download(self.url, self.dest,
+                             on_progress=lambda d, t: self.progress.emit(d, t))
+            if self.isInterruptionRequested():
+                return
+            self.done.emit(str(self.dest))
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(f"Tải cập nhật lỗi: {e}")

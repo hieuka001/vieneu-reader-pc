@@ -13,6 +13,9 @@
 
 Lần đầu bấm Nghe, engine tải model từ HuggingFace (cần mạng, vài trăm MB) — các lần sau chạy hoàn toàn offline.
 
+## Tự cập nhật
+App tự kiểm tra bản mới trên GitHub Releases mỗi lần mở (và có nút **⟳ Kiểm tra cập nhật**): có bản mới → hỏi 1 chạm → tự tải, tự ghi đè và mở lại. Từ bản 1.1.0 trở đi không cần tải tay nữa.
+
 ## Chạy bản đóng gói
 Tải `VieNeuReader-Windows.zip` từ Releases, giải nén, chạy `VieNeuReader.exe`. Không cần cài Python.
 
